@@ -13,22 +13,7 @@ Dockerfile                pinned ns-3.48 environment for the whole group
 results/                  one CSV per run (one row per task)
 ```
 
-## What changed since week 8
 
-- **Edges now process tasks.** Each edge has a CPU speed (`--edgeGhz`) and a bounded FIFO
-  queue (`--queueCap`). Processing time = task work / speed, one task at a time. Default:
-  one fast edge (4 GHz, "the GPU node") and two slow ones (1 GHz). Before this, every task met
-  its deadline whichever edge was chosen, so policies could not be compared.
-- **Full-queue drop policy** (`--dropPolicy`): `tail` rejects the new task, `oldest` evicts
-  the task at the head of the queue to make room.
-- **Every task gets exactly one outcome**, including failures: `met`, `queue_full`,
-  `evicted`, `expired` (still queued or processing at its deadline; processing is aborted),
-  `lost` (packet never arrived). Previously lost tasks produced no feedback at all.
-- **Requests carry edge state**: current queue lengths and CPU speeds. Policies can use or
-  ignore them (the learner ignores them and learns from feedback only).
-- **Seeds, ports and output files per run**, so many runs can go in parallel (HPC-ready).
-- **Time-bound recommendations** (`TTL`): a user reuses its last recommendation for TTL
-  seconds instead of asking again.
 
 ## Run with Docker (recommended, same for everyone)
 
