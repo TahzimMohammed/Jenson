@@ -85,7 +85,3 @@ Apptainer, so compile the scratch code into the image first (or keep a copy of n
 home directory), then run with `SKIP_BUILD=1`. Array jobs get distinct ports automatically
 through `SLURM_ARRAY_TASK_ID`. Not yet tested on the cluster.
 
-## Not modelled yet (next steps)
-
-Wireless links and mobility, retransmissions, tasks bigger than one packet, processor sharing
-at edges, stale/delayed edge-state broadcasts.
