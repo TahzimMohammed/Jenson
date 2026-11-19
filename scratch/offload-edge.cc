@@ -53,13 +53,19 @@ static std::string g_rxBuf;
 static void
 PipeConnect(uint16_t port)
 {
-    g_fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     for (int i = 0; i < 100; ++i) // retry ~10 s while the recommender starts up
     {
+        // Fresh socket per attempt: after a failed connect() the old socket is unusable on
+        // macOS/BSD (and not guaranteed reusable by POSIX), so retrying it never succeeds.
+        if (g_fd >= 0)
+        {
+            close(g_fd);
+        }
+        g_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (connect(g_fd, (sockaddr*)&addr, sizeof(addr)) == 0)
         {
             // Send each small JSON line immediately. Without this, Nagle's algorithm holds a
