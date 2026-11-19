@@ -33,6 +33,8 @@
 #include <arpa/inet.h>
 #include <deque>
 #include <map>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
@@ -58,6 +60,11 @@ PipeConnect(uint16_t port)
     {
         if (connect(g_fd, (sockaddr*)&addr, sizeof(addr)) == 0)
         {
+            // Send each small JSON line immediately. Without this, Nagle's algorithm holds a
+            // request back until the previous feedback line is ACKed, and with Linux delayed
+            // ACKs that stalls every task by ~40 ms of wall-clock time.
+            int one = 1;
+            setsockopt(g_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
             return;
         }
         usleep(100000);

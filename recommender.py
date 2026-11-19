@@ -153,6 +153,8 @@ def main():
           f"127.0.0.1:{args.port}", flush=True)
 
     conn, _ = srv.accept()
+    # Reply immediately to each small message (no Nagle batching; see offload-edge.cc).
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     counts = {}
     with conn, conn.makefile("rw") as f, open(args.log, "w", newline="") as out:
         w = csv.DictWriter(out, fieldnames=FIELDS)
