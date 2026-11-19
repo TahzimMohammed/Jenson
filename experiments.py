@@ -5,6 +5,12 @@
   python3 experiments.py --jobs 8 --seeds 10
   python3 experiments.py --analyse-only   # just rebuild the table and charts
 
+Same runs, one isolated folder each (for Slurm, see docs/BIG-RUNS.md):
+  python3 experiments.py --plan           # write runs.csv: one line per run
+  python3 experiments.py --run-plan --jobs 4 [--docker IMAGE]   # run runs.csv here
+  sbatch --array=1-<N>%50 slurm/sweep.sbatch                    # ...or on the cluster
+  python3 experiments.py --collect        # results/runs/* -> summary.csv + charts
+
 Sweep 1 (policies): every policy x load level x seed.
 Sweep 2 (time-bound): shortest_wait with different recommendation lifetimes (TTL)
 at one load level, to show how stale recommendations hurt.
@@ -21,6 +27,7 @@ import csv
 import glob
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -38,6 +45,8 @@ TTL_INTERVAL = 0.3
 DELAYS = [0, 0.02, 0.05]                    # sweep 3: simulated seconds per query
 DELAY_POLICIES = ["shortest_wait", "learner"]
 SCENARIO = ["--nUsers=10", "--simTime=30"]
+RUNS_CSV = os.path.join(HERE, "runs.csv")
+RUNS_DIR = os.path.join(HERE, "results", "runs")
 
 
 def run_name(policy, ttl, dd, interval, seed):
@@ -70,9 +79,7 @@ def run_one(job):
         return out
     env = dict(os.environ, POLICY=policy, TTL=str(ttl), SEED=str(seed), PORT=str(port),
                OUT=out, SKIP_BUILD="1")
-    cmd = [os.path.join(HERE, "run.sh"), f"--meanInterval={interval}", *SCENARIO]
-    if dd:
-        cmd.append(f"--decisionDelay={dd}")
+    cmd = [os.path.join(HERE, "run.sh"), *scenario_args(dd, interval)]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         sys.stderr.write(f"FAILED {job}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}\n")
@@ -80,6 +87,86 @@ def run_one(job):
             os.remove(out)  # don't keep a partial file
         return None
     return out
+
+
+def scenario_args(dd, interval):
+    """ns-3 arguments for one run (the same for run.sh and run-one.sh)."""
+    return [f"--meanInterval={interval}", *SCENARIO] + ([f"--decisionDelay={dd}"] if dd else [])
+
+
+def plan(seeds):
+    """Write runs.csv (run_id,policy,ttl,seed,args): the run list for Slurm or --run-plan."""
+    with open(RUNS_CSV, "w", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["run_id", "policy", "ttl", "seed", "args"])
+        jobs = all_jobs(seeds)
+        for n, (policy, ttl, dd, interval, seed) in enumerate(jobs, 1):
+            args = " ".join(scenario_args(dd, interval))
+            assert "," not in args, "slurm/sweep.sbatch splits runs.csv on commas"
+            w.writerow([f"{n:04d}", policy, ttl, seed, args])
+    print(f"{len(jobs)} runs -> {RUNS_CSV}")
+    print(f"cluster: sbatch --array=1-{len(jobs)}%50 slurm/sweep.sbatch")
+
+
+def read_plan():
+    if not os.path.exists(RUNS_CSV):
+        sys.exit("runs.csv not found: run python3 experiments.py --plan first")
+    with open(RUNS_CSV) as f:
+        return list(csv.DictReader(f))
+
+
+def run_plan(jobs, docker_image):
+    """Run every line of runs.csv through run-one.sh, like the Slurm array job does."""
+    runs = read_plan()
+    os.makedirs(RUNS_DIR, exist_ok=True)
+    if not docker_image:
+        build()  # run-one.sh uses the compiled binary, so make sure it matches scratch/
+
+    def one(run):
+        out = os.path.join(RUNS_DIR, run["run_id"])
+        if os.path.exists(os.path.join(out, "summary.txt")) and os.path.getsize(
+                os.path.join(out, "summary.txt")):
+            return run["run_id"], "skipped (done)"
+        env = dict(POLICY=run["policy"], TTL=run["ttl"], SEED=run["seed"])
+        if docker_image:
+            cmd = ["docker", "run", "--rm", "-v", f"{RUNS_DIR}:/results"]
+            for k, v in env.items():
+                cmd += ["-e", f"{k}={v}"]
+            cmd += [docker_image, "run-one.sh", f"/results/{run['run_id']}", *run["args"].split()]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+        else:
+            cmd = [os.path.join(HERE, "run-one.sh"), out, *run["args"].split()]
+            r = subprocess.run(cmd, env=dict(os.environ, **env), capture_output=True, text=True)
+        return run["run_id"], "ok" if r.returncode == 0 else f"FAILED: {r.stderr.strip()[-300:]}"
+
+    failed = 0
+    with ThreadPoolExecutor(jobs) as pool:
+        for run_id, status in pool.map(one, runs):
+            failed += status.startswith("FAILED")
+            if status != "ok":
+                print(run_id, status, flush=True)
+    print(f"{len(runs)} runs, {failed} failed")
+
+
+def collect():
+    """Copy each finished results/runs/<id>/feedback.csv into results/sweep/ under its
+    usual name, then build summary.csv and the charts exactly as for a local sweep."""
+    done = missing = 0
+    for run in read_plan():
+        src = os.path.join(RUNS_DIR, run["run_id"])
+        fb, summ = os.path.join(src, "feedback.csv"), os.path.join(src, "summary.txt")
+        if not (os.path.exists(summ) and os.path.getsize(summ) and os.path.exists(fb)):
+            missing += 1
+            continue
+        params = dict(a.lstrip("-").split("=", 1) for a in run["args"].split())
+        # raw strings from runs.csv, so names match a local sweep exactly (ttl1, not ttl1.0)
+        name = run_name(run["policy"], run["ttl"], params.get("decisionDelay", ""),
+                        params["meanInterval"], run["seed"])
+        shutil.copyfile(fb, os.path.join(OUTDIR, name + ".csv"))
+        done += 1
+    print(f"collected {done} runs from {RUNS_DIR}" + (f", {missing} missing/unfinished" if missing else ""))
+    if not done:
+        sys.exit("nothing to collect")
 
 
 def build():
@@ -212,10 +299,25 @@ def main():
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--analyse-only", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--plan", action="store_true", help="write runs.csv and stop")
+    mode.add_argument("--run-plan", action="store_true",
+                      help="run runs.csv here via run-one.sh (one folder per run)")
+    mode.add_argument("--collect", action="store_true",
+                      help="results/runs/* -> summary.csv + charts")
+    ap.add_argument("--docker", metavar="IMAGE", help="with --run-plan: run inside this image")
     args = ap.parse_args()
     os.makedirs(OUTDIR, exist_ok=True)
 
-    if not args.analyse_only:
+    if args.plan:
+        plan(range(1, args.seeds + 1))
+        return
+    if args.run_plan:
+        run_plan(args.jobs, args.docker)
+        return
+    if args.collect:
+        collect()
+    elif not args.analyse_only:
         build()
         jobs = all_jobs(range(1, args.seeds + 1))
         jobs = [(*j, 6000 + n) for n, j in enumerate(jobs)]  # unique port per run

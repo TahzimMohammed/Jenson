@@ -1,0 +1,38 @@
+# Builds the Docker image for x86-64 (what Aire runs) on GitHub's servers and
+# publishes it to GitHub Container Registry, so nobody has to cross-compile on a Mac.
+# On Aire:  apptainer pull ns3-offload.sif docker://ghcr.io/<owner>/<repo>:latest
+name: container
+
+on:
+  push:
+    branches: [main]
+    paths: ["Dockerfile", "scratch/**", "recommender.py", "run-one.sh", ".github/workflows/container.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name (registry names must be lower case)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: JOBS=4
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

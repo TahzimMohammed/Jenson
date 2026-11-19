@@ -1,0 +1,7 @@
+.git
+results
+logs
+runs.csv
+*.sif
+*.tar
+__pycache__

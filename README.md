@@ -7,9 +7,12 @@ chosen edge, and reports the outcome back once the task has finished or failed.
 ```
 scratch/offload-edge.cc   ns-3 scenario: users -> base station -> edge nodes (with queues + CPUs)
 recommender.py            policies: fixed, random, fastest, shortest_wait, learner (+ optional TTL)
-run.sh                    starts the recommender, then the scenario (one run)
-experiments.py            runs the policy comparison sweep, writes summary.csv + charts
-Dockerfile                pinned ns-3.48 environment for the whole group
+run.sh                    starts the recommender, then the scenario (one run, for development)
+run-one.sh                one isolated run with the prebuilt binary (experiments, HPC)
+experiments.py            runs the sweeps, writes summary.csv + charts; --plan/--collect for HPC
+Dockerfile                pinned ns-3.49 environment for the whole group (and the cluster)
+slurm/sweep.sbatch        Slurm array job: one line of runs.csv per task
+docs/BIG-RUNS.md          how to run sweeps in parallel, in Docker and on Aire
 results/                  one CSV per run (one row per task)
 ```
 
@@ -18,7 +21,7 @@ results/                  one CSV per run (one row per task)
 ## Run with Docker (recommended, same for everyone)
 
 ```
-docker build -t ns3-offload .          # only the last layer rebuilds if you built week 8
+docker build -t ns3-offload .          # ns-3.49, optimized; first build 15-30 min
 docker run --rm -v "$PWD":/work ns3-offload ./run.sh --nUsers=10
 docker run --rm -v "$PWD":/work -e POLICY=learner ns3-offload ./run.sh
 docker run --rm -v "$PWD":/work ns3-offload python3 experiments.py --jobs 4
@@ -82,10 +85,17 @@ With the defaults the edges can serve about 40 + 10 + 10 = 60 tasks/s. Ten users
 was made), `edge` (chosen), `outcome, met_deadline, delay` (total, met tasks only),
 `net_delay, queue_wait, edge_load` (tasks at that edge when the outcome happened).
 
-## HPC (Apptainer)
+## HPC (Apptainer on Aire)
 
-`apptainer build ns3.sif docker-daemon://ns3-offload:latest`. `/opt/ns-3` is read-only under
-Apptainer, so compile the scratch code into the image first (or keep a copy of ns-3 in your
-home directory), then run with `SKIP_BUILD=1`. Array jobs get distinct ports automatically
-through `SLURM_ARRAY_TASK_ID`. Not yet tested on the cluster.
+The image compiles `offload-edge` in at build time (`/usr/local/bin/offload-sim`), and
+`run-one.sh` runs that binary directly, so it works in a read-only Apptainer image. GitHub
+Actions builds the x86-64 image and publishes it to GHCR. In short:
+
+```
+python3 experiments.py --plan                                   # runs.csv
+sbatch --array=1-$(( $(wc -l < runs.csv) - 1 ))%50 slurm/sweep.sbatch
+python3 experiments.py --collect                                # summary.csv + charts
+```
+
+Full steps, and what is not yet tested: [docs/BIG-RUNS.md](docs/BIG-RUNS.md).
 
