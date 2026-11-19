@@ -8,7 +8,9 @@
 //
 // For every task:
 //   1. ns-3 PAUSES and asks the external recommender (TCP, JSON lines) which edge to use.
-//   2. The task is sent as one UDP packet to that edge.
+//   2. The task is sent as one UDP packet to that edge. If the recommender had to be
+//      queried (not a cached TTL answer), sending waits --decisionDelay simulated
+//      seconds first, which counts against the deadline.
 //   3. The edge puts it in a bounded FIFO queue and processes tasks one at a time.
 //      Processing time = task work (Gcycles) / edge speed (GHz).
 //   4. ns-3 reports the outcome back to the recommender:
@@ -116,6 +118,7 @@ struct Task
     double created;  // when the task was generated (s)
     double deadline; // absolute deadline (s)
     double work;     // Gcycles
+    double sentAt;   // when the packet left the user (created + decision delay, if any)
     bool arrived = false;
     double arrivedAt = 0;
     double startedAt = -1;
@@ -134,6 +137,7 @@ static std::map<uint32_t, Task> g_tasks; // tasks without an outcome yet
 static std::vector<Edge> g_edges;
 static std::map<std::string, uint32_t> g_outcomes;
 static uint32_t g_nextTaskId = 0;
+static uint32_t g_cachedAnswers = 0; // recommender replies that were cached TTL answers
 
 static Ptr<ExponentialRandomVariable> g_interArrival;
 static Ptr<UniformRandomVariable> g_workRv;
@@ -143,6 +147,7 @@ static uint32_t g_taskSize;
 static double g_taskWork;
 static double g_deadline;
 static double g_simTime;
+static double g_decisionDelay; // simulated seconds per recommender query (not for cache hits)
 static uint32_t g_queueCap;
 static bool g_dropOldest;
 static const uint16_t kEdgePort = 9000;
@@ -173,7 +178,7 @@ Report(uint32_t id, const std::string& outcome)
     fb << R"(,"delay":)";
     met ? fb << (now - t.created) : fb << "null";
     fb << R"(,"net_delay":)";
-    t.arrived ? fb << (t.arrivedAt - t.created) : fb << "null";
+    t.arrived ? fb << (t.arrivedAt - t.sentAt) : fb << "null";
     fb << R"(,"queue_wait":)";
     t.startedAt >= 0 ? fb << (t.startedAt - t.arrivedAt) : fb << "null";
     fb << R"(,"edge_load":)" << EdgeLoad(g_edges[t.edge]) << "}";
@@ -282,6 +287,24 @@ EdgeReceive(uint32_t e, Ptr<Socket> sock)
     }
 }
 
+// Put a task's packet on the network (now, or after the decision delay).
+static void
+SendTask(uint32_t id)
+{
+    auto it = g_tasks.find(id);
+    if (it == g_tasks.end())
+    {
+        return; // the decision took longer than the deadline: already reported as lost
+    }
+    Task& t = it->second;
+    t.sentAt = Simulator::Now().GetSeconds();
+    SeqTsHeader hdr;
+    hdr.SetSeq(id);
+    Ptr<Packet> p = Create<Packet>(g_taskSize - hdr.GetSerializedSize());
+    p->AddHeader(hdr);
+    g_userSockets[t.user]->SendTo(p, 0, InetSocketAddress(g_edgeAddrs[t.edge], kEdgePort));
+}
+
 static void
 GenerateTask(uint32_t user)
 {
@@ -312,14 +335,28 @@ GenerateTask(uint32_t user)
     NS_ABORT_MSG_IF(pos == std::string::npos, "Bad recommender reply: " << reply);
     uint32_t edge = std::stoul(reply.substr(reply.find(':', pos) + 1));
     NS_ABORT_MSG_IF(edge >= g_edges.size(), "Recommender returned invalid edge " << edge);
+    // "cached": true means the recommender reused this user's TTL answer without running
+    // the policy, so no decision time is charged. Missing field = not cached.
+    bool cached = false;
+    auto cpos = reply.find("\"cached\"");
+    if (cpos != std::string::npos)
+    {
+        auto v = reply.find_first_not_of(" \t", reply.find(':', cpos) + 1);
+        cached = v != std::string::npos && reply.compare(v, 4, "true") == 0;
+    }
+    g_cachedAnswers += cached ? 1 : 0;
 
-    // 2. Offload: send the task to the chosen edge.
-    SeqTsHeader hdr;
-    hdr.SetSeq(id);
-    Ptr<Packet> p = Create<Packet>(g_taskSize - hdr.GetSerializedSize());
-    p->AddHeader(hdr);
-    g_tasks[id] = Task{user, edge, now, now + g_deadline, work};
-    g_userSockets[user]->SendTo(p, 0, InetSocketAddress(g_edgeAddrs[edge], kEdgePort));
+    // 2. Offload: send the task to the chosen edge, after the decision delay if any.
+    //    The deadline still counts from now (when the task was created).
+    g_tasks[id] = Task{user, edge, now, now + g_deadline, work, now};
+    if (cached || g_decisionDelay <= 0)
+    {
+        SendTask(id);
+    }
+    else
+    {
+        Simulator::Schedule(Seconds(g_decisionDelay), &SendTask, id);
+    }
     Simulator::Schedule(Seconds(g_deadline), &CheckDeadline, id);
 
     // 3. Schedule this user's next task.
@@ -358,6 +395,7 @@ main(int argc, char* argv[])
     g_deadline = 0.2;  // seconds
     g_simTime = 30.0;
     g_queueCap = 5;
+    g_decisionDelay = 0.0; // simulated seconds a recommender query takes
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("nUsers", "Number of user devices", nUsers);
@@ -371,12 +409,16 @@ main(int argc, char* argv[])
     cmd.AddValue("queueCap", "Max waiting tasks per edge", g_queueCap);
     cmd.AddValue("dropPolicy", "Full-queue policy: tail or oldest", dropPolicy);
     cmd.AddValue("lossRate", "Packet loss probability on edge links", lossRate);
+    cmd.AddValue("decisionDelay",
+                 "Simulated seconds per recommender query (cached TTL answers are free)",
+                 g_decisionDelay);
     cmd.AddValue("port", "Recommender TCP port", port);
     cmd.Parse(argc, argv); // also accepts --RngRun=N for independent seeds
     NS_ABORT_MSG_IF(g_taskSize > 1400 || g_taskSize < 64, "taskSize must be 64..1400");
     NS_ABORT_MSG_IF(dropPolicy != "tail" && dropPolicy != "oldest",
                     "dropPolicy must be tail or oldest");
     NS_ABORT_MSG_IF(g_queueCap < 1, "queueCap must be >= 1");
+    NS_ABORT_MSG_IF(g_decisionDelay < 0, "decisionDelay must be >= 0");
     g_dropOldest = dropPolicy == "oldest";
 
     std::vector<double> speeds = ParseList(edgeGhz);
@@ -453,5 +495,6 @@ main(int argc, char* argv[])
         std::cout << "  " << outcome << ": " << n << "\n";
     }
     std::cout << "Unresolved:      " << g_tasks.size() << "\n";
+    std::cout << "Cached answers:  " << g_cachedAnswers << "\n";
     return 0;
 }

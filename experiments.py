@@ -8,8 +8,12 @@
 Sweep 1 (policies): every policy x load level x seed.
 Sweep 2 (time-bound): shortest_wait with different recommendation lifetimes (TTL)
 at one load level, to show how stale recommendations hurt.
+Sweep 3 (TTL trade-off): shortest_wait and learner, TTL x decision delay at one load
+level. Each recommender query costs --decisionDelay simulated seconds; a cached (TTL)
+answer is free. So a TTL > 0 trades staleness for fewer slow queries.
 
-Outputs in results/sweep/: one CSV per run, summary.csv, policies.png, ttl.png.
+Outputs in results/sweep/: one CSV per run, summary.csv, policies.png, ttl.png,
+ttl_delay.png.
 Uses only the standard library plus matplotlib (for the charts).
 """
 import argparse
@@ -31,17 +35,44 @@ POLICIES = ["fixed", "random", "fastest", "learner", "shortest_wait"]
 INTERVALS = [0.5, 0.3, 0.2]
 TTLS = [0, 0.25, 1, 4]
 TTL_INTERVAL = 0.3
+DELAYS = [0, 0.02, 0.05]                    # sweep 3: simulated seconds per query
+DELAY_POLICIES = ["shortest_wait", "learner"]
 SCENARIO = ["--nUsers=10", "--simTime=30"]
 
 
+def run_name(policy, ttl, dd, interval, seed):
+    """File name for one run. dd (decision delay) is only in the name when > 0."""
+    dd_part = f"_dd{dd}" if dd else ""
+    return f"{policy}_ttl{ttl}{dd_part}_int{interval}_seed{seed}"
+
+
+def parse_name(name):
+    policy, rest = name.split("_ttl")
+    ttl, rest = rest.split("_int")
+    ttl, dd = ttl.split("_dd") if "_dd" in ttl else (ttl, 0)
+    interval, seed = rest.split("_seed")
+    return policy, float(ttl), float(dd), float(interval), int(seed)
+
+
+def all_jobs(seeds):
+    """Every run of sweeps 1-3 as (policy, ttl, decision_delay, interval, seed), no repeats."""
+    jobs = [(p, 0, 0, i, s) for p in POLICIES for i in INTERVALS for s in seeds]
+    jobs += [("shortest_wait", t, 0, TTL_INTERVAL, s) for t in TTLS if t > 0 for s in seeds]
+    jobs += [(p, t, d, TTL_INTERVAL, s) for p in DELAY_POLICIES for t in TTLS
+             for d in DELAYS for s in seeds]
+    return list(dict.fromkeys(jobs))
+
+
 def run_one(job):
-    policy, ttl, interval, seed, port = job
-    out = os.path.join(OUTDIR, f"{policy}_ttl{ttl}_int{interval}_seed{seed}.csv")
+    policy, ttl, dd, interval, seed, port = job
+    out = os.path.join(OUTDIR, run_name(policy, ttl, dd, interval, seed) + ".csv")
     if os.path.exists(out) and os.path.getsize(out) > 0:
         return out
     env = dict(os.environ, POLICY=policy, TTL=str(ttl), SEED=str(seed), PORT=str(port),
                OUT=out, SKIP_BUILD="1")
     cmd = [os.path.join(HERE, "run.sh"), f"--meanInterval={interval}", *SCENARIO]
+    if dd:
+        cmd.append(f"--decisionDelay={dd}")
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         sys.stderr.write(f"FAILED {job}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}\n")
@@ -66,10 +97,7 @@ def mean_ci(xs):
 def analyse():
     rows = []
     for path in sorted(glob.glob(os.path.join(OUTDIR, "*_seed*.csv"))):
-        name = os.path.basename(path)[:-4]
-        policy, rest = name.split("_ttl")
-        ttl, rest = rest.split("_int")
-        interval, seed = rest.split("_seed")
+        policy, ttl, dd, interval, seed = parse_name(os.path.basename(path)[:-4])
         with open(path) as f:
             tasks = list(csv.DictReader(f))
         if not tasks:
@@ -79,20 +107,20 @@ def analyse():
         for t in tasks:
             outcomes[t["outcome"]] = outcomes.get(t["outcome"], 0) + 1
         rows.append(dict(
-            policy=policy, ttl=float(ttl), interval=float(interval), seed=int(seed),
+            policy=policy, ttl=ttl, dd=dd, interval=interval, seed=seed,
             tasks=len(tasks), hit=len(met) / len(tasks),
             delay=statistics.mean(float(t["delay"]) for t in met) if met else float("nan"),
             **{f"frac_{k}": v / len(tasks) for k, v in outcomes.items()}))
 
     groups = {}
     for r in rows:
-        groups.setdefault((r["policy"], r["ttl"], r["interval"]), []).append(r)
+        groups.setdefault((r["policy"], r["ttl"], r["dd"], r["interval"]), []).append(r)
     summary = []
-    for (policy, ttl, interval), rs in sorted(groups.items()):
+    for (policy, ttl, dd, interval), rs in sorted(groups.items()):
         hit, hit_ci = mean_ci([r["hit"] for r in rs])
         delays = [r["delay"] for r in rs if not math.isnan(r["delay"])]
         delay, delay_ci = mean_ci(delays) if delays else (float("nan"), 0.0)
-        s = dict(policy=policy, ttl=ttl, interval=interval,
+        s = dict(policy=policy, ttl=ttl, decision_delay=dd, interval=interval,
                  load_tasks_per_s=round(10 / interval, 1), seeds=len(rs),
                  hit_rate=round(hit, 3), hit_ci95=round(hit_ci, 3),
                  delay_ms=round(1000 * delay, 1), delay_ci95_ms=round(1000 * delay_ci, 1))
@@ -105,10 +133,10 @@ def analyse():
         w.writeheader()
         w.writerows(summary)
 
-    print(f"{'policy':14}{'ttl':>5}{'tasks/s':>9}{'hit rate':>16}{'delay ms':>10}"
+    print(f"{'policy':14}{'ttl':>5}{'dd':>6}{'tasks/s':>9}{'hit rate':>16}{'delay ms':>10}"
           f"{'queue_full':>12}{'expired':>9}")
     for s in summary:
-        print(f"{s['policy']:14}{s['ttl']:>5}{s['load_tasks_per_s']:>9}"
+        print(f"{s['policy']:14}{s['ttl']:>5}{s['decision_delay']:>6}{s['load_tasks_per_s']:>9}"
               f"{s['hit_rate']:>9.3f} ±{s['hit_ci95']:.3f}{s['delay_ms']:>10}"
               f"{s['queue_full']:>12}{s['expired']:>9}")
     plot(summary)
@@ -126,7 +154,8 @@ def plot(summary):
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for policy in POLICIES:
         pts = sorted((s["load_tasks_per_s"], s["hit_rate"], s["hit_ci95"])
-                     for s in summary if s["policy"] == policy and s["ttl"] == 0)
+                     for s in summary
+                     if s["policy"] == policy and s["ttl"] == 0 and s["decision_delay"] == 0)
         if pts:
             x, y, e = zip(*pts)
             ax.errorbar(x, y, yerr=e, marker="o", capsize=3, label=policy)
@@ -139,7 +168,8 @@ def plot(summary):
     fig.savefig(os.path.join(OUTDIR, "policies.png"), dpi=150)
 
     pts = sorted((s["ttl"], s["hit_rate"], s["hit_ci95"]) for s in summary
-                 if s["policy"] == "shortest_wait" and s["interval"] == TTL_INTERVAL)
+                 if s["policy"] == "shortest_wait" and s["interval"] == TTL_INTERVAL
+                 and s["decision_delay"] == 0)
     if len(pts) > 1:
         fig, ax = plt.subplots(figsize=(6, 4))
         x, y, e = zip(*pts)
@@ -153,6 +183,29 @@ def plot(summary):
         fig.tight_layout()
         fig.savefig(os.path.join(OUTDIR, "ttl.png"), dpi=150)
 
+    # Sweep 3: does a TTL pay off once each query costs time?
+    fig, axes = plt.subplots(1, len(DELAY_POLICIES), figsize=(11, 4), sharey=True)
+    plotted = False
+    for ax, policy in zip(axes, DELAY_POLICIES):
+        for dd in DELAYS:
+            pts = sorted((s["ttl"], s["hit_rate"], s["hit_ci95"]) for s in summary
+                         if s["policy"] == policy and s["interval"] == TTL_INTERVAL
+                         and s["decision_delay"] == dd)
+            if len(pts) > 1:
+                x, y, e = zip(*pts)
+                ax.errorbar(range(len(x)), y, yerr=e, marker="o", capsize=3,
+                            label=f"{1000 * dd:g} ms per query")
+                ax.set_xticks(range(len(x)), [f"{t:g}" for t in x])
+                plotted = True
+        ax.set(title=policy, xlabel="TTL (s); 0 = ask for every task")
+        ax.grid(alpha=0.3)
+        ax.legend()
+    axes[0].set_ylabel("Fraction of tasks meeting deadline")
+    fig.suptitle(f"TTL vs decision delay ({10 / TTL_INTERVAL:.0f} tasks/s)")
+    fig.tight_layout()
+    if plotted:
+        fig.savefig(os.path.join(OUTDIR, "ttl_delay.png"), dpi=150)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -164,10 +217,7 @@ def main():
 
     if not args.analyse_only:
         build()
-        jobs = [(p, 0, i, s) for p in POLICIES for i in INTERVALS
-                for s in range(1, args.seeds + 1)]
-        jobs += [("shortest_wait", t, TTL_INTERVAL, s) for t in TTLS if t > 0
-                 for s in range(1, args.seeds + 1)]
+        jobs = all_jobs(range(1, args.seeds + 1))
         jobs = [(*j, 6000 + n) for n, j in enumerate(jobs)]  # unique port per run
         done = 0
         with ThreadPoolExecutor(args.jobs) as pool:

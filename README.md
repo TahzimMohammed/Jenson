@@ -37,7 +37,7 @@ NS3_DIR=~/ns-3-dev python3 experiments.py
 | Variable | Default | Meaning |
 |---|---|---|
 | `POLICY` | fixed | `fixed` (always edge 1), `random`, `fastest`, `shortest_wait`, `learner` |
-| `TTL` | 0 | seconds a recommendation stays valid per user; 0 = ask every task |
+| `TTL` | 0 | seconds a recommendation stays valid per user; 0 = ask every task. Reuses skip `--decisionDelay` |
 | `SEED` | 1 | passed to ns-3 as `--RngRun` and to the recommender |
 | `PORT` | 5555 + `SLURM_ARRAY_TASK_ID` | must differ between simultaneous runs |
 | `OUT` | `results/<policy>_ttl<ttl>_seed<seed>.csv` | per-task output |
@@ -66,6 +66,7 @@ Policies:
 | `--taskSize` | 1000 | bytes per task (64 to 1400, one packet) |
 | `--taskWork` | 0.1 | mean Gcycles per task (each task uniform 0.5x to 1.5x) |
 | `--deadline` | 0.2 | seconds |
+| `--decisionDelay` | 0 | simulated seconds each recommender query takes before the task is sent; counts against the deadline. Cached TTL answers (`"cached": true` in the reply) are free |
 | `--edgeGhz` | 4,1,1 | CPU speed per edge; the last value repeats for extra edges |
 | `--queueCap` | 5 | max waiting tasks per edge |
 | `--dropPolicy` | tail | `tail` or `oldest` |

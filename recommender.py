@@ -4,7 +4,9 @@
 Protocol (one JSON object per line, over TCP on localhost):
   ns-3 -> here : {"type": "request", "task_id": 7, "user": 2, "t": 1.53, "size": 1000,
                   "work": 0.12, "deadline": 0.2, "queues": [3, 0, 1], "edge_ghz": [4, 1, 1]}
-  here -> ns-3 : {"edge": 1}
+  here -> ns-3 : {"edge": 1, "cached": false}
+                 (cached = true when a TTL answer was reused without running the policy;
+                  ns-3 only charges --decisionDelay when it is false)
   ns-3 -> here : {"type": "feedback", "task_id": 7, "user": 2, "edge": 1, "outcome": "met",
                   "met_deadline": true, "delay": 0.031, "net_delay": 0.006,
                   "queue_wait": 0.0, "edge_load": 2}
@@ -126,14 +128,20 @@ POLICIES = {"fixed": Fixed, "random": Random, "shortest_wait": ShortestWait, "le
 
 
 class TimeBound:
-    """Wraps a policy: reuse each user's last answer for `ttl` simulated seconds."""
+    """Wraps a policy: reuse each user's last answer for `ttl` simulated seconds.
+
+    last_cached tells main() whether the latest answer came from the cache, so ns-3 can
+    skip the decision delay for it.
+    """
 
     def __init__(self, inner, ttl):
         self.inner, self.ttl, self.cache = inner, ttl, {}
+        self.last_cached = False
 
     def choose(self, req):
         hit = self.cache.get(req["user"])
-        if hit and req["t"] - hit[0] < self.ttl:
+        self.last_cached = bool(hit and req["t"] - hit[0] < self.ttl)
+        if self.last_cached:
             return hit[1]
         edge = self.inner.choose(req)
         self.cache[req["user"]] = (req["t"], edge)
@@ -184,9 +192,10 @@ def main():
             msg = json.loads(line)
             if msg["type"] == "request":
                 edge = policy.choose(msg)
+                cached = getattr(policy, "last_cached", False)
                 msg["edge"] = edge
                 requests[msg["task_id"]] = msg
-                f.write(json.dumps({"edge": edge}) + "\n")
+                f.write(json.dumps({"edge": edge, "cached": cached}) + "\n")
                 f.flush()
             elif msg["type"] == "feedback":
                 policy.feedback(msg)
