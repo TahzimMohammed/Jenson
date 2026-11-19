@@ -225,14 +225,15 @@ CheckDeadline(uint32_t id)
         Report(id, "lost");
         return;
     }
-    Edge& edge = g_edges[t.edge];
+    uint32_t e = t.edge; // copy: Report() erases the task, so t dangles after it
+    Edge& edge = g_edges[e];
     if (edge.busy && edge.current == id)
     {
         // Abort: no point finishing a task whose deadline has passed.
         Simulator::Cancel(edge.doneEvent);
         edge.busy = false;
         Report(id, "expired");
-        StartNext(t.edge);
+        StartNext(e);
         return;
     }
     edge.queue.erase(std::remove(edge.queue.begin(), edge.queue.end(), id), edge.queue.end());
