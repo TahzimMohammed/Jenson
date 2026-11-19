@@ -6,7 +6,7 @@ chosen edge, and reports the outcome back once the task has finished or failed.
 
 ```
 scratch/offload-edge.cc   ns-3 scenario: users -> base station -> edge nodes (with queues + CPUs)
-recommender.py            policies: fixed, random, shortest_wait, learner (+ optional TTL)
+recommender.py            policies: fixed, random, fastest, shortest_wait, learner (+ optional TTL)
 run.sh                    starts the recommender, then the scenario (one run)
 experiments.py            runs the policy comparison sweep, writes summary.csv + charts
 Dockerfile                pinned ns-3.48 environment for the whole group
@@ -36,7 +36,7 @@ NS3_DIR=~/ns-3-dev python3 experiments.py
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `POLICY` | fixed | `fixed` (always edge 1), `random`, `shortest_wait`, `learner` |
+| `POLICY` | fixed | `fixed` (always edge 1), `random`, `fastest`, `shortest_wait`, `learner` |
 | `TTL` | 0 | seconds a recommendation stays valid per user; 0 = ask every task |
 | `SEED` | 1 | passed to ns-3 as `--RngRun` and to the recommender |
 | `PORT` | 5555 + `SLURM_ARRAY_TASK_ID` | must differ between simultaneous runs |
@@ -46,6 +46,9 @@ NS3_DIR=~/ns-3-dev python3 experiments.py
 Policies:
 - `fixed`: the week-8 dummy (always edge 1, a slow edge).
 - `random`: uniform random edge.
+- `fastest`: always the edge with the highest CPU speed (ties broken at random). A static
+  "best hardware" baseline: no queue state, no feedback. A fairer bar than `fixed`, which
+  deliberately picks a slow edge.
 - `shortest_wait`: smallest (queued tasks + 1) / speed. Uses live queue state, so it is the
   "perfect information" heuristic to beat.
 - `learner`: collaborative-style. Keeps a success rate per (user, edge), updated from

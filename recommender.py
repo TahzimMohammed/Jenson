@@ -16,6 +16,7 @@ Policies (--policy):
   fixed         always the same edge (--fixed-edge), the week-8 dummy
   random        uniform random edge
   shortest_wait edge with the smallest (tasks queued + 1) / speed; uses live queue state
+  fastest       always the edge with the highest edge_ghz (ties: random); a static baseline
   learner       learns a success rate for each (user, edge) pair from feedback only,
                 borrows other users' experience for edges a user hasn't tried,
                 and explores at random with probability --epsilon
@@ -70,6 +71,24 @@ class ShortestWait:
         pass
 
 
+class Fastest:
+    """Static baseline: always the edge with the highest CPU speed (edge_ghz).
+
+    Uses no queue state and no feedback, so it shows what "just pick the best hardware"
+    achieves. Ties are broken at random with the seeded rng.
+    """
+
+    def __init__(self, args, rng):
+        self.rng = rng
+
+    def choose(self, req):
+        best = max(req["edge_ghz"])
+        return self.rng.choice([e for e, g in enumerate(req["edge_ghz"]) if g == best])
+
+    def feedback(self, msg):
+        pass
+
+
 class Learner:
     """Collaborative-style recommender that sees only feedback, never queue state.
 
@@ -102,7 +121,8 @@ class Learner:
         self.rating[key] = y if old is None else (1 - self.alpha) * old + self.alpha * y
 
 
-POLICIES = {"fixed": Fixed, "random": Random, "shortest_wait": ShortestWait, "learner": Learner}
+POLICIES = {"fixed": Fixed, "random": Random, "shortest_wait": ShortestWait, "learner": Learner,
+            "fastest": Fastest}
 
 
 class TimeBound:

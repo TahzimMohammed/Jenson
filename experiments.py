@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTDIR = os.path.join(HERE, "results", "sweep")
 
-POLICIES = ["fixed", "random", "learner", "shortest_wait"]
+POLICIES = ["fixed", "random", "fastest", "learner", "shortest_wait"]
 # mean seconds between tasks per user -> offered load. With 10 users, the default
 # edges (4,1,1 GHz) and 0.1 Gcycles/task, total capacity is ~60 tasks/s.
 INTERVALS = [0.5, 0.3, 0.2]
